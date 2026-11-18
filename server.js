@@ -81,15 +81,19 @@ async function setupPool(name, base, store, alertsTable) {
     let poolLockedReason = '';
     let manualLock = false;
     let timeLocked = false;
+    // forceOpen: manual unlock that overrides the 20:00-04:00 time lock.
+    // It clears itself when the time lock ends at 04:00, so the next night locks normally.
+    let forceOpen = false;
 
     function applyLockState(isTimeLocked) {
         timeLocked = isTimeLocked;
-        const shouldLock = isTimeLocked || manualLock;
+        if (!isTimeLocked && forceOpen) forceOpen = false;
+        const shouldLock = manualLock || (isTimeLocked && !forceOpen);
 
         if (shouldLock) {
-            const reason = isTimeLocked
-                ? 'Locked at 20:00. Unlocks at 04:00.'
-                : 'Locked manually.';
+            const reason = manualLock
+                ? 'Locked manually.'
+                : 'Locked at 20:00. Unlocks at 04:00.';
 
             if (!poolLocked || poolLockedReason !== reason) {
                 poolLocked = true;
@@ -206,6 +210,7 @@ async function setupPool(name, base, store, alertsTable) {
         try {
             const { hour } = getZambiaTime();
             if (hour !== 21) return;
+            if (forceOpen) return;
 
             const todayStr = new Date().toLocaleDateString(
                 'en-CA',
@@ -257,7 +262,8 @@ async function setupPool(name, base, store, alertsTable) {
                 locked: poolLocked,
                 reason: poolLockedReason,
                 manualLock: manualLock,
-                timeLocked: timeLocked
+                forceOpen: forceOpen,
+                timeLocked: timeLocked && !forceOpen && !manualLock
             });
 
         } catch (e) {
@@ -574,6 +580,7 @@ async function setupPool(name, base, store, alertsTable) {
             poolLocked = false;
             poolLockedReason = '';
             manualLock = false;
+            forceOpen = false;
 
             res.json({ success: true });
 
@@ -593,10 +600,19 @@ async function setupPool(name, base, store, alertsTable) {
                 });
             }
 
-            manualLock = typeof lock === 'boolean' ? lock : !manualLock;
-
+            const wantLock = typeof lock === 'boolean' ? lock : !poolLocked;
             const { hour, minute } = getZambiaTime();
-            applyLockState(checkLockStatus(hour, minute, 0).shouldLock);
+            const isTimeLocked = checkLockStatus(hour, minute, 0).shouldLock;
+
+            if (wantLock) {
+                manualLock = true;
+                forceOpen = false;
+            } else {
+                manualLock = false;
+                forceOpen = isTimeLocked; // override tonight's time lock
+            }
+
+            applyLockState(isTimeLocked);
 
             res.json({
                 success: true,
@@ -1284,7 +1300,7 @@ body{font-family:sans-serif;background:#04060a;min-height:100vh;display:flex;ali
 <div class="top-bar">
     <div class="db-title">&#128274; ${name} pool</div>
     <div class="top-right">
-        <button id="lock-btn" class="lock-btn ${manualLock ? 'on' : ''}">${manualLock ? '&#128275; Unlock' : '&#128274; Lock'}</button>
+        <button id="lock-btn" class="lock-btn ${poolLocked ? 'on' : ''}">${poolLocked ? '&#128275; Unlock' : '&#128274; Lock'}</button>
         <div id="pill" class="pill ${poolLocked ? 'pill-locked' : 'pill-live'}">
             <div class="dot ${poolLocked ? 'dot-locked' : 'dot-live'}"></div>
             <span id="pill-text">${poolLocked ? 'Locked' : 'Live'}</span>
@@ -1298,7 +1314,7 @@ body{font-family:sans-serif;background:#04060a;min-height:100vh;display:flex;ali
         <div class="bl ${poolLocked ? 'c-locked' : 'c-free'}" id="free-label">${poolLocked ? '&#128274; Locked' : '&#10003; Free'}</div>
         <div class="bn ${poolLocked ? 'c-locked' : 'c-free'}" id="num-free">${freeAccounts.length}</div>
         <div class="bd ${poolLocked ? 'd-locked' : 'd-free'}" id="free-desc">${poolLocked ? poolLockedReason : 'Accounts ready'}</div>
-        <div id="unlock-block" style="display:${timeLocked ? 'block' : 'none'}">
+        <div id="unlock-block" style="display:${(poolLocked && !manualLock) ? 'block' : 'none'}">
             <div class="unlock-t" id="unlock-countdown">--:--:--</div>
             <div class="unlock-s">Unlocks at 04:00 (Zambia)</div>
         </div>
@@ -1427,7 +1443,7 @@ body{font-family:sans-serif;background:#04060a;min-height:100vh;display:flex;ali
                 var freeDesc = document.getElementById('free-desc');
                 var unlockBlock = document.getElementById('unlock-block');
 
-                updateLockBtn(d.manualLock);
+                updateLockBtn(d.locked);
 
                 if (d.locked) {
                     pill.className = 'pill pill-locked';
@@ -1485,7 +1501,7 @@ body{font-family:sans-serif;background:#04060a;min-height:100vh;display:flex;ali
             .catch(function() {});
     }
 
-    var manualLockOn = ${manualLock ? 'true' : 'false'};
+    var manualLockOn = ${poolLocked ? 'true' : 'false'};
 
     function updateLockBtn(on) {
         manualLockOn = !!on;
@@ -1515,7 +1531,7 @@ body{font-family:sans-serif;background:#04060a;min-height:100vh;display:flex;ali
         })
         .then(function(d) {
             if (d.success) {
-                updateLockBtn(d.manualLock);
+                updateLockBtn(d.locked);
                 refreshStats();
             } else {
                 alert(d.error || 'Error');
